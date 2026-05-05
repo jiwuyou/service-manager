@@ -2,6 +2,10 @@
 
 Local-only service manager (CLI + REST API) with a static Web UI.
 
+Documentation:
+
+- Chinese usage guide: [docs/usage.zh-CN.md](docs/usage.zh-CN.md)
+
 The server binds to `127.0.0.1:8787` by default and protects all `/api/v1/*` endpoints with a bearer
 token (except `/api/v1/health`).
 
