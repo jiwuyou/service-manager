@@ -1,0 +1,12 @@
+/target
+/dist
+
+*.tmp
+*.log
+*.swp
+.DS_Store
+
+# Local scratch/config (repo-local overrides; not used by default runtime config paths)
+/config.local.json
+/data.local
+

@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>service-manager</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand__name">service-manager</div>
+        <div class="brand__meta" id="serverOrigin"></div>
+      </div>
+
+      <div class="auth">
+        <label class="auth__label" for="tokenInput">Token</label>
+        <input
+          id="tokenInput"
+          class="auth__input"
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Paste bearer token"
+        />
+        <button class="btn" id="btnTokenToggle" type="button" title="Show/hide token">
+          Show
+        </button>
+        <button class="btn btn--primary" id="btnTokenSave" type="button" title="Save token">
+          Save
+        </button>
+        <button class="btn" id="btnTokenClear" type="button" title="Clear saved token">
+          Clear
+        </button>
+        <div class="chip chip--neutral" id="connChip" title="API connectivity">
+          Offline
+        </div>
+      </div>
+    </header>
+
+    <div class="global">
+      <div class="notice notice--error hidden" id="globalError"></div>
+      <div class="notice notice--info hidden" id="globalInfo"></div>
+    </div>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="sidebar__toolbar">
+          <input
+            id="svcSearch"
+            class="input"
+            type="search"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Search services"
+          />
+          <button class="btn btn--primary" id="btnCreateService" type="button">New</button>
+          <button class="btn" id="btnRefreshAll" type="button" title="Refresh services + providers">
+            Refresh
+          </button>
+        </div>
+
+        <div class="sidebar__section">
+          <div class="sidebar__sectionTitle">Services</div>
+          <div class="list" id="servicesList" aria-label="Services list"></div>
+          <div class="sidebar__footer">
+            <div class="muted" id="servicesMeta"></div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="content">
+        <div class="tabs">
+          <button class="tab is-active" id="tabService" type="button" data-tab="service">
+            Service
+          </button>
+          <button class="tab" id="tabProviders" type="button" data-tab="providers">
+            Providers
+          </button>
+        </div>
+
+        <section class="view is-active" id="viewService" data-view="service">
+          <div class="panel" id="serviceEmpty">
+            <h2 class="panel__title">No service selected</h2>
+            <p class="muted">Select a service from the left, or create a new one.</p>
+          </div>
+
+          <div class="panel hidden" id="servicePanel">
+            <div class="panel__header">
+              <div class="panel__titleRow">
+                <h2 class="panel__title" id="svcTitle"></h2>
+                <div class="chip chip--neutral" id="svcStateChip">unknown</div>
+              </div>
+              <div class="panel__sub" id="svcSubtitle"></div>
+            </div>
+
+            <div class="actions" id="svcActions">
+              <button class="btn" id="btnSvcEdit" type="button">Edit</button>
+              <button class="btn" id="btnSvcRegister" type="button">Register</button>
+              <button class="btn" id="btnSvcUnregister" type="button">Unregister</button>
+              <span class="actions__spacer"></span>
+              <button class="btn" id="btnSvcStart" type="button">Start</button>
+              <button class="btn" id="btnSvcStop" type="button">Stop</button>
+              <button class="btn" id="btnSvcRestart" type="button">Restart</button>
+              <span class="actions__spacer"></span>
+              <button class="btn btn--danger" id="btnSvcDelete" type="button">Delete</button>
+            </div>
+
+            <div class="grid2">
+              <div class="card">
+                <div class="card__header">
+                  <div class="card__title">Status</div>
+                  <div class="card__tools">
+                    <button class="btn btn--small" id="btnRefreshStatus" type="button">
+                      Refresh
+                    </button>
+                  </div>
+                </div>
+                <div class="kv" id="svcStatusKv"></div>
+              </div>
+
+              <div class="card">
+                <div class="card__header">
+                  <div class="card__title">Logs</div>
+                  <div class="card__tools">
+                    <label class="field field--inline" for="logsLimit">
+                      <span class="field__label">Limit</span>
+                      <input class="input input--small" id="logsLimit" type="number" min="1" />
+                    </label>
+                    <button class="btn btn--small" id="btnFetchLogs" type="button">Fetch</button>
+                  </div>
+                </div>
+                <pre class="logs" id="svcLogs"></pre>
+              </div>
+            </div>
+
+            <details class="details" id="svcSpecDetails">
+              <summary>Service spec (read-only)</summary>
+              <pre class="code" id="svcSpecJson"></pre>
+            </details>
+          </div>
+        </section>
+
+        <section class="view" id="viewProviders" data-view="providers">
+          <div class="panel">
+            <div class="panel__header">
+              <div class="panel__titleRow">
+                <h2 class="panel__title">Providers</h2>
+                <div class="chip chip--neutral" id="providersMeta"></div>
+              </div>
+              <div class="panel__sub muted">Diagnostics and detected status.</div>
+            </div>
+            <div class="tableWrap">
+              <table class="table" id="providersTable" aria-label="Providers list">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Name</th>
+                    <th>Detected</th>
+                    <th>Capabilities</th>
+                    <th>Notes</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="modal" id="svcModal">
+      <form method="dialog" class="modal__inner" id="svcForm">
+        <div class="modal__header">
+          <h3 class="modal__title" id="svcModalTitle"></h3>
+          <button class="iconBtn" id="btnModalClose" type="button" title="Close">X</button>
+        </div>
+
+        <div class="modal__body">
+          <div class="formGrid">
+            <label class="field" for="fName">
+              <span class="field__label">Name</span>
+              <input class="input" id="fName" name="name" autocomplete="off" spellcheck="false" />
+              <span class="field__help"
+                >^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$</span
+              >
+            </label>
+
+            <label class="field" for="fProvider">
+              <span class="field__label">Provider</span>
+              <select class="input" id="fProvider" name="provider"></select>
+            </label>
+
+            <label class="field field--full" for="fDescription">
+              <span class="field__label">Description</span>
+              <textarea class="input textarea" id="fDescription" name="description"></textarea>
+            </label>
+
+            <label class="field field--full" for="fCommand">
+              <span class="field__label">Command (argv)</span>
+              <textarea
+                class="input textarea textarea--mono"
+                id="fCommand"
+                name="command"
+                spellcheck="false"
+                placeholder="/path/to/exe&#10;--flag&#10;arg"
+              ></textarea>
+            </label>
+
+            <label class="field field--full" for="fWorkingDir">
+              <span class="field__label">Working directory</span>
+              <input class="input" id="fWorkingDir" name="working_dir" spellcheck="false" />
+            </label>
+
+            <label class="field field--full" for="fEnv">
+              <span class="field__label">Env (KEY=VALUE per line)</span>
+              <textarea
+                class="input textarea textarea--mono"
+                id="fEnv"
+                name="env"
+                spellcheck="false"
+              ></textarea>
+            </label>
+
+            <label class="field field--full" for="fRuntime">
+              <span class="field__label">Runtime options (JSON object)</span>
+              <textarea
+                class="input textarea textarea--mono"
+                id="fRuntime"
+                name="runtime"
+                spellcheck="false"
+                placeholder="{}"
+              ></textarea>
+            </label>
+
+            <div class="field">
+              <span class="field__label">Restart mode</span>
+              <select class="input" id="fRestartMode" name="restart_mode">
+                <option value="no">no</option>
+                <option value="on-failure">on-failure</option>
+                <option value="always">always</option>
+              </select>
+            </div>
+
+            <label class="field" for="fMaxRetries">
+              <span class="field__label">Max retries</span>
+              <input
+                class="input"
+                id="fMaxRetries"
+                name="max_retries"
+                type="number"
+                min="0"
+                step="1"
+              />
+            </label>
+
+            <label class="field" for="fEnabled">
+              <span class="field__label">Enabled</span>
+              <div class="checkRow">
+                <input id="fEnabled" name="enabled" type="checkbox" />
+                <span class="muted">Include in operations and listings.</span>
+              </div>
+            </label>
+
+            <label class="field" for="fTags">
+              <span class="field__label">Tags (comma-separated)</span>
+              <input class="input" id="fTags" name="tags" spellcheck="false" />
+            </label>
+          </div>
+
+          <div class="subpanel">
+            <div class="subpanel__header">
+              <div class="subpanel__title">Health checks</div>
+              <button class="btn btn--small" id="btnAddHealth" type="button">Add</button>
+            </div>
+            <div class="healthList" id="healthList"></div>
+          </div>
+
+          <div class="notice notice--error hidden" id="formError"></div>
+        </div>
+
+        <div class="modal__footer">
+          <button class="btn" id="btnFormCancel" type="button">Cancel</button>
+          <button class="btn btn--primary" id="btnFormSave" type="submit">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
+
