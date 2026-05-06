@@ -318,6 +318,35 @@ pub struct ServiceStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceGroup {
+    pub name: String,
+    pub service_ids: Vec<ServiceId>,
+    pub services: Vec<Service>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupActionResult {
+    pub group: String,
+    pub action: Action,
+    pub total: usize,
+    pub succeeded: Vec<ServiceId>,
+    pub skipped: Vec<GroupActionSkip>,
+    pub failed: Vec<GroupActionFailure>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupActionSkip {
+    pub service_id: ServiceId,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupActionFailure {
+    pub service_id: ServiceId,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogEntry {
     pub time: DateTime<Utc>,
     #[serde(default)]

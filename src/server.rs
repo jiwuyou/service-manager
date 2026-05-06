@@ -15,7 +15,8 @@ use crate::{
     api,
     error::{AppError, Result},
     model::{
-        Action, AuditEvent, DetectResult, LogsOptions, Provider, ProviderId, ProviderInfo, Service,
+        Action, AuditEvent, Capability, DetectResult, GroupActionFailure, GroupActionResult,
+        GroupActionSkip, LogsOptions, Provider, ProviderId, ProviderInfo, Service, ServiceGroup,
         ServiceId, ServiceSpec, ServiceStatus,
     },
     providers,
@@ -24,6 +25,7 @@ use crate::{
 
 pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8787";
 pub const ENV_AUTH_TOKEN: &str = "SERVICE_MANAGER_TOKEN";
+const GROUP_TAG_PREFIX: &str = "group:";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoreConfig {
@@ -134,6 +136,89 @@ impl Engine {
 
     pub fn get_service(&self, id: &ServiceId) -> Result<Service> {
         self.store.get_service(id)
+    }
+
+    pub fn list_groups(&self) -> Result<Vec<ServiceGroup>> {
+        let mut groups: BTreeMap<String, Vec<Service>> = BTreeMap::new();
+        for svc in self.store.list_services()? {
+            for group in service_groups(&svc) {
+                groups.entry(group).or_default().push(svc.clone());
+            }
+        }
+
+        Ok(groups
+            .into_iter()
+            .map(|(name, services)| ServiceGroup {
+                name,
+                service_ids: services.iter().map(|svc| svc.id.clone()).collect(),
+                services,
+            })
+            .collect())
+    }
+
+    pub async fn group_action(&self, group: &str, action: Action) -> Result<GroupActionResult> {
+        let group = group.trim();
+        if group.is_empty() {
+            return Err(AppError::BadRequest("group name is required".to_string()));
+        }
+        if !matches!(action, Action::Start | Action::Stop | Action::Restart) {
+            return Err(AppError::BadRequest(
+                "group action must be start, stop, or restart".to_string(),
+            ));
+        }
+
+        let Some(svc_group) = self.list_groups()?.into_iter().find(|g| g.name == group) else {
+            return Err(AppError::NotFound);
+        };
+
+        let mut result = GroupActionResult {
+            group: group.to_string(),
+            action,
+            total: svc_group.services.len(),
+            succeeded: Vec::new(),
+            skipped: Vec::new(),
+            failed: Vec::new(),
+        };
+
+        for svc in svc_group.services {
+            let required = match action {
+                Action::Start => Capability::Start,
+                Action::Stop => Capability::Stop,
+                Action::Restart => Capability::Restart,
+                _ => unreachable!("validated group action"),
+            };
+            let Some(provider) = self.registry.get(&svc.spec.provider) else {
+                result.failed.push(GroupActionFailure {
+                    service_id: svc.id,
+                    message: format!("provider not found: {:?}", svc.spec.provider.0),
+                });
+                continue;
+            };
+            if !provider.capabilities().contains(&required) {
+                result.skipped.push(GroupActionSkip {
+                    service_id: svc.id,
+                    reason: "provider does not support this action".to_string(),
+                });
+                continue;
+            }
+
+            let id = svc.id.clone();
+            let outcome = match action {
+                Action::Start => self.start(&id).await,
+                Action::Stop => self.stop(&id).await,
+                Action::Restart => self.restart(&id).await,
+                _ => unreachable!("validated group action"),
+            };
+            match outcome {
+                Ok(()) => result.succeeded.push(id),
+                Err(e) => result.failed.push(GroupActionFailure {
+                    service_id: id,
+                    message: e.to_string(),
+                }),
+            }
+        }
+
+        Ok(result)
     }
 
     pub async fn create_service(&self, mut spec: ServiceSpec) -> Result<Service> {
@@ -409,6 +494,22 @@ impl Engine {
 pub struct AppState {
     pub config: Config,
     pub engine: Arc<Engine>,
+}
+
+fn service_groups(svc: &Service) -> Vec<String> {
+    svc.spec
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let tag = tag.trim();
+            let name = tag.strip_prefix(GROUP_TAG_PREFIX)?.trim();
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        })
+        .collect()
 }
 
 pub async fn serve(cfg_path: Option<PathBuf>, bind: Option<String>) -> Result<()> {

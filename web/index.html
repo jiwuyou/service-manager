@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -15,26 +15,26 @@
       </div>
 
       <div class="auth">
-        <label class="auth__label" for="tokenInput">Token</label>
+        <label class="auth__label" for="tokenInput">令牌</label>
         <input
           id="tokenInput"
           class="auth__input"
           type="password"
           autocomplete="off"
           spellcheck="false"
-          placeholder="Paste bearer token"
+          placeholder="粘贴 Bearer 令牌"
         />
-        <button class="btn" id="btnTokenToggle" type="button" title="Show/hide token">
-          Show
+        <button class="btn" id="btnTokenToggle" type="button" title="显示/隐藏令牌">
+          显示
         </button>
-        <button class="btn btn--primary" id="btnTokenSave" type="button" title="Save token">
-          Save
+        <button class="btn btn--primary" id="btnTokenSave" type="button" title="保存令牌">
+          保存
         </button>
-        <button class="btn" id="btnTokenClear" type="button" title="Clear saved token">
-          Clear
+        <button class="btn" id="btnTokenClear" type="button" title="清除已保存令牌">
+          清除
         </button>
-        <div class="chip chip--neutral" id="connChip" title="API connectivity">
-          Offline
+        <div class="chip chip--neutral" id="connChip" title="API 连接状态">
+          离线
         </div>
       </div>
     </header>
@@ -43,6 +43,24 @@
       <div class="notice notice--error hidden" id="globalError"></div>
       <div class="notice notice--info hidden" id="globalInfo"></div>
     </div>
+
+    <section class="quickControl" aria-label="快捷控制">
+      <div class="quickControl__header">
+        <div class="quickControl__label">快捷控制</div>
+        <div class="muted" id="quickServicesMeta"></div>
+      </div>
+      <div class="quickControl__block">
+        <div class="quickControl__subheader">
+          <div class="quickControl__sectionTitle">服务组</div>
+          <div class="muted" id="quickGroupsMeta"></div>
+        </div>
+        <div class="quickGroupList" id="quickGroupsList"></div>
+      </div>
+      <div class="quickControl__subheader quickControl__subheader--services">
+        <div class="quickControl__sectionTitle">服务</div>
+      </div>
+      <div class="quickControl__list" id="quickServicesList"></div>
+    </section>
 
     <div class="layout">
       <aside class="sidebar">
@@ -53,17 +71,17 @@
             type="search"
             autocomplete="off"
             spellcheck="false"
-            placeholder="Search services"
+            placeholder="搜索服务"
           />
-          <button class="btn btn--primary" id="btnCreateService" type="button">New</button>
-          <button class="btn" id="btnRefreshAll" type="button" title="Refresh services + providers">
-            Refresh
+          <button class="btn btn--primary" id="btnCreateService" type="button">新建</button>
+          <button class="btn" id="btnRefreshAll" type="button" title="刷新服务和提供方">
+            刷新
           </button>
         </div>
 
         <div class="sidebar__section">
-          <div class="sidebar__sectionTitle">Services</div>
-          <div class="list" id="servicesList" aria-label="Services list"></div>
+          <div class="sidebar__sectionTitle">服务</div>
+          <div class="list" id="servicesList" aria-label="服务列表"></div>
           <div class="sidebar__footer">
             <div class="muted" id="servicesMeta"></div>
           </div>
@@ -73,47 +91,47 @@
       <main class="content">
         <div class="tabs">
           <button class="tab is-active" id="tabService" type="button" data-tab="service">
-            Service
+            服务
           </button>
           <button class="tab" id="tabProviders" type="button" data-tab="providers">
-            Providers
+            提供方
           </button>
         </div>
 
         <section class="view is-active" id="viewService" data-view="service">
           <div class="panel" id="serviceEmpty">
-            <h2 class="panel__title">No service selected</h2>
-            <p class="muted">Select a service from the left, or create a new one.</p>
+            <h2 class="panel__title">未选择服务</h2>
+            <p class="muted">从左侧选择一个服务，或新建服务。</p>
           </div>
 
           <div class="panel hidden" id="servicePanel">
             <div class="panel__header">
               <div class="panel__titleRow">
                 <h2 class="panel__title" id="svcTitle"></h2>
-                <div class="chip chip--neutral" id="svcStateChip">unknown</div>
+                <div class="chip chip--neutral" id="svcStateChip">未知</div>
               </div>
               <div class="panel__sub" id="svcSubtitle"></div>
             </div>
 
             <div class="actions" id="svcActions">
-              <button class="btn" id="btnSvcEdit" type="button">Edit</button>
-              <button class="btn" id="btnSvcRegister" type="button">Register</button>
-              <button class="btn" id="btnSvcUnregister" type="button">Unregister</button>
+              <button class="btn" id="btnSvcEdit" type="button">编辑</button>
+              <button class="btn" id="btnSvcRegister" type="button">注册</button>
+              <button class="btn" id="btnSvcUnregister" type="button">取消注册</button>
               <span class="actions__spacer"></span>
-              <button class="btn" id="btnSvcStart" type="button">Start</button>
-              <button class="btn" id="btnSvcStop" type="button">Stop</button>
-              <button class="btn" id="btnSvcRestart" type="button">Restart</button>
+              <button class="btn" id="btnSvcStart" type="button">启动</button>
+              <button class="btn" id="btnSvcStop" type="button">停止</button>
+              <button class="btn" id="btnSvcRestart" type="button">重启</button>
               <span class="actions__spacer"></span>
-              <button class="btn btn--danger" id="btnSvcDelete" type="button">Delete</button>
+              <button class="btn btn--danger" id="btnSvcDelete" type="button">删除</button>
             </div>
 
             <div class="grid2">
               <div class="card">
                 <div class="card__header">
-                  <div class="card__title">Status</div>
+                  <div class="card__title">状态</div>
                   <div class="card__tools">
                     <button class="btn btn--small" id="btnRefreshStatus" type="button">
-                      Refresh
+                      刷新
                     </button>
                   </div>
                 </div>
@@ -122,13 +140,13 @@
 
               <div class="card">
                 <div class="card__header">
-                  <div class="card__title">Logs</div>
+                  <div class="card__title">日志</div>
                   <div class="card__tools">
                     <label class="field field--inline" for="logsLimit">
-                      <span class="field__label">Limit</span>
+                      <span class="field__label">条数</span>
                       <input class="input input--small" id="logsLimit" type="number" min="1" />
                     </label>
-                    <button class="btn btn--small" id="btnFetchLogs" type="button">Fetch</button>
+                    <button class="btn btn--small" id="btnFetchLogs" type="button">获取</button>
                   </div>
                 </div>
                 <pre class="logs" id="svcLogs"></pre>
@@ -136,7 +154,7 @@
             </div>
 
             <details class="details" id="svcSpecDetails">
-              <summary>Service spec (read-only)</summary>
+              <summary>服务配置（只读）</summary>
               <pre class="code" id="svcSpecJson"></pre>
             </details>
           </div>
@@ -146,20 +164,20 @@
           <div class="panel">
             <div class="panel__header">
               <div class="panel__titleRow">
-                <h2 class="panel__title">Providers</h2>
+                <h2 class="panel__title">提供方</h2>
                 <div class="chip chip--neutral" id="providersMeta"></div>
               </div>
-              <div class="panel__sub muted">Diagnostics and detected status.</div>
+              <div class="panel__sub muted">诊断和自动检测状态。</div>
             </div>
             <div class="tableWrap">
-              <table class="table" id="providersTable" aria-label="Providers list">
+              <table class="table" id="providersTable" aria-label="提供方列表">
                 <thead>
                   <tr>
                     <th>ID</th>
-                    <th>Name</th>
-                    <th>Detected</th>
-                    <th>Capabilities</th>
-                    <th>Notes</th>
+                    <th>名称</th>
+                    <th>已检测</th>
+                    <th>能力</th>
+                    <th>备注</th>
                   </tr>
                 </thead>
                 <tbody></tbody>
@@ -174,13 +192,13 @@
       <form method="dialog" class="modal__inner" id="svcForm">
         <div class="modal__header">
           <h3 class="modal__title" id="svcModalTitle"></h3>
-          <button class="iconBtn" id="btnModalClose" type="button" title="Close">X</button>
+          <button class="iconBtn" id="btnModalClose" type="button" title="关闭">X</button>
         </div>
 
         <div class="modal__body">
           <div class="formGrid">
             <label class="field" for="fName">
-              <span class="field__label">Name</span>
+              <span class="field__label">名称</span>
               <input class="input" id="fName" name="name" autocomplete="off" spellcheck="false" />
               <span class="field__help"
                 >^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$</span
@@ -188,17 +206,17 @@
             </label>
 
             <label class="field" for="fProvider">
-              <span class="field__label">Provider</span>
+              <span class="field__label">提供方</span>
               <select class="input" id="fProvider" name="provider"></select>
             </label>
 
             <label class="field field--full" for="fDescription">
-              <span class="field__label">Description</span>
+              <span class="field__label">描述</span>
               <textarea class="input textarea" id="fDescription" name="description"></textarea>
             </label>
 
             <label class="field field--full" for="fCommand">
-              <span class="field__label">Command (argv)</span>
+              <span class="field__label">命令（argv）</span>
               <textarea
                 class="input textarea textarea--mono"
                 id="fCommand"
@@ -209,12 +227,12 @@
             </label>
 
             <label class="field field--full" for="fWorkingDir">
-              <span class="field__label">Working directory</span>
+              <span class="field__label">工作目录</span>
               <input class="input" id="fWorkingDir" name="working_dir" spellcheck="false" />
             </label>
 
             <label class="field field--full" for="fEnv">
-              <span class="field__label">Env (KEY=VALUE per line)</span>
+              <span class="field__label">环境变量（每行 KEY=VALUE）</span>
               <textarea
                 class="input textarea textarea--mono"
                 id="fEnv"
@@ -224,7 +242,7 @@
             </label>
 
             <label class="field field--full" for="fRuntime">
-              <span class="field__label">Runtime options (JSON object)</span>
+              <span class="field__label">运行时选项（JSON 对象）</span>
               <textarea
                 class="input textarea textarea--mono"
                 id="fRuntime"
@@ -235,16 +253,16 @@
             </label>
 
             <div class="field">
-              <span class="field__label">Restart mode</span>
+              <span class="field__label">重启模式</span>
               <select class="input" id="fRestartMode" name="restart_mode">
-                <option value="no">no</option>
-                <option value="on-failure">on-failure</option>
-                <option value="always">always</option>
+                <option value="no">不重启</option>
+                <option value="on-failure">失败时重启</option>
+                <option value="always">总是重启</option>
               </select>
             </div>
 
             <label class="field" for="fMaxRetries">
-              <span class="field__label">Max retries</span>
+              <span class="field__label">最大重试次数</span>
               <input
                 class="input"
                 id="fMaxRetries"
@@ -256,23 +274,23 @@
             </label>
 
             <label class="field" for="fEnabled">
-              <span class="field__label">Enabled</span>
+              <span class="field__label">启用</span>
               <div class="checkRow">
                 <input id="fEnabled" name="enabled" type="checkbox" />
-                <span class="muted">Include in operations and listings.</span>
+                <span class="muted">纳入操作和列表展示。</span>
               </div>
             </label>
 
             <label class="field" for="fTags">
-              <span class="field__label">Tags (comma-separated)</span>
+              <span class="field__label">标签（逗号分隔，组使用 group:名称）</span>
               <input class="input" id="fTags" name="tags" spellcheck="false" />
             </label>
           </div>
 
           <div class="subpanel">
             <div class="subpanel__header">
-              <div class="subpanel__title">Health checks</div>
-              <button class="btn btn--small" id="btnAddHealth" type="button">Add</button>
+              <div class="subpanel__title">健康检查</div>
+              <button class="btn btn--small" id="btnAddHealth" type="button">添加</button>
             </div>
             <div class="healthList" id="healthList"></div>
           </div>
@@ -281,8 +299,8 @@
         </div>
 
         <div class="modal__footer">
-          <button class="btn" id="btnFormCancel" type="button">Cancel</button>
-          <button class="btn btn--primary" id="btnFormSave" type="submit">Save</button>
+          <button class="btn" id="btnFormCancel" type="button">取消</button>
+          <button class="btn btn--primary" id="btnFormSave" type="submit">保存</button>
         </div>
       </form>
     </dialog>
@@ -290,4 +308,3 @@
     <script src="/app.js"></script>
   </body>
 </html>
-

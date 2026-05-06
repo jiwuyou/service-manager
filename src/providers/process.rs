@@ -3,7 +3,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::Stdio,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 #[cfg(unix)]
@@ -12,6 +12,7 @@ use std::os::unix::process::CommandExt;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
 
 use crate::{
     error::Result,
@@ -81,6 +82,10 @@ impl ProcessProvider {
 
     fn meta_path(&self, svc: &Service) -> Result<PathBuf> {
         Ok(self.state_dir(svc)?.join("meta.json"))
+    }
+
+    fn started_at_path_or(&self, svc: &Service) -> Result<PathBuf> {
+        Ok(self.started_at_path(svc)?)
     }
 
     fn ensure_dirs(&self, svc: &Service) -> Result<()> {
@@ -175,6 +180,27 @@ impl ProcessProvider {
         {
             let _ = pid;
             Err(bad_request("process provider is only supported on unix"))
+        }
+    }
+
+    async fn wait_for_pid_exit(&self, pid: u32, timeout: Duration) -> Result<bool> {
+        #[cfg(unix)]
+        {
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                if !self.pid_is_alive(pid).await.unwrap_or(false) {
+                    return Ok(true);
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Ok(false);
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (pid, timeout);
+            Ok(false)
         }
     }
 
@@ -300,9 +326,10 @@ impl ProcessProvider {
         Self::verify_pid_with_obs(svc, pid, meta, start, cmdline)
     }
 
-    fn cleanup_stale(pid_path: &Path, meta_path: &Path) {
+    fn cleanup_runtime_state(pid_path: &Path, meta_path: &Path, started_at_path: &Path) {
         let _ = fs::remove_file(pid_path);
         let _ = fs::remove_file(meta_path);
+        let _ = fs::remove_file(started_at_path);
     }
 }
 
@@ -379,14 +406,17 @@ impl Provider for ProcessProvider {
 
         let pid_path = self.pid_path(svc)?;
         let meta_path = self.meta_path(svc)?;
+        let started_at_path = self.started_at_path_or(svc)?;
         if let Some(pid) = Self::read_pid(&pid_path)? {
             if !self.pid_is_alive(pid).await.unwrap_or(false) {
-                Self::cleanup_stale(&pid_path, &meta_path);
+                Self::cleanup_runtime_state(&pid_path, &meta_path, &started_at_path);
             } else {
                 let meta = Self::read_meta(&meta_path);
                 match Self::verify_pid(svc, pid, meta.as_ref()) {
                     ProcVerify::Managed => return Ok(()),
-                    ProcVerify::Stale(_) => Self::cleanup_stale(&pid_path, &meta_path),
+                    ProcVerify::Stale(_) => {
+                        Self::cleanup_runtime_state(&pid_path, &meta_path, &started_at_path)
+                    }
                     ProcVerify::Unverifiable(reason) => {
                         return Err(bad_request(format!(
                             "refusing to start: existing pidfile points to a live process but identity cannot be verified: pid={pid} ({reason})"
@@ -466,13 +496,14 @@ impl Provider for ProcessProvider {
     async fn stop(&self, svc: &Service) -> Result<()> {
         let pid_path = self.pid_path(svc)?;
         let meta_path = self.meta_path(svc)?;
+        let started_at_path = self.started_at_path_or(svc)?;
         let Some(pid) = Self::read_pid(&pid_path)? else {
             return Ok(());
         };
 
         // If it's already gone, clean up stale pidfile.
         if !self.pid_is_alive(pid).await.unwrap_or(false) {
-            Self::cleanup_stale(&pid_path, &meta_path);
+            Self::cleanup_runtime_state(&pid_path, &meta_path, &started_at_path);
             return Ok(());
         }
 
@@ -480,10 +511,16 @@ impl Provider for ProcessProvider {
         match Self::verify_pid(svc, pid, meta.as_ref()) {
             ProcVerify::Managed => {
                 self.kill_term(pid).await?;
+                if !self.wait_for_pid_exit(pid, Duration::from_secs(5)).await? {
+                    return Err(bad_request(format!(
+                        "process did not exit after SIGTERM within timeout: pid={pid}"
+                    )));
+                }
+                Self::cleanup_runtime_state(&pid_path, &meta_path, &started_at_path);
                 Ok(())
             }
             ProcVerify::Stale(_) => {
-                Self::cleanup_stale(&pid_path, &meta_path);
+                Self::cleanup_runtime_state(&pid_path, &meta_path, &started_at_path);
                 Ok(())
             }
             ProcVerify::Unverifiable(reason) => Err(bad_request(format!(
@@ -501,9 +538,8 @@ impl Provider for ProcessProvider {
         let observed_at = Utc::now();
         let pid_path = self.pid_path(svc)?;
         let meta_path = self.meta_path(svc)?;
-        let started_at = Self::read_started_at(&self.started_at_path(svc)?)
-            .ok()
-            .flatten();
+        let started_at_path = self.started_at_path_or(svc)?;
+        let started_at = Self::read_started_at(&started_at_path).ok().flatten();
 
         let mut st = ServiceStatus {
             service_id: svc.id.clone(),
@@ -523,7 +559,7 @@ impl Provider for ProcessProvider {
         };
 
         if !self.pid_is_alive(pid).await.unwrap_or(false) {
-            Self::cleanup_stale(&pid_path, &meta_path);
+            Self::cleanup_runtime_state(&pid_path, &meta_path, &started_at_path);
             st.state = ServiceState::Stopped;
             st.message = "stale pidfile".to_string();
             return Ok(st);
@@ -538,7 +574,7 @@ impl Provider for ProcessProvider {
                 Ok(st)
             }
             ProcVerify::Stale(reason) => {
-                Self::cleanup_stale(&pid_path, &meta_path);
+                Self::cleanup_runtime_state(&pid_path, &meta_path, &started_at_path);
                 st.state = ServiceState::Stopped;
                 st.message = format!("stale pidfile ({reason})");
                 Ok(st)
@@ -621,6 +657,29 @@ mod tests {
         let s = "a\nb\nc\nd\n";
         let out = ProcessProvider::slice_log_lines(s, Some(2));
         assert_eq!(out, vec!["c", "d"]);
+    }
+
+    #[test]
+    fn cleanup_runtime_state_removes_pid_meta_and_started_at_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "service-manager-process-cleanup-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let pid_path = dir.join("pid");
+        let meta_path = dir.join("meta.json");
+        let started_at_path = dir.join("started_at");
+
+        fs::write(&pid_path, b"123\n").unwrap();
+        fs::write(&meta_path, b"{}").unwrap();
+        fs::write(&started_at_path, b"2026-05-05T00:00:00Z\n").unwrap();
+
+        ProcessProvider::cleanup_runtime_state(&pid_path, &meta_path, &started_at_path);
+
+        assert!(!pid_path.exists());
+        assert!(!meta_path.exists());
+        assert!(!started_at_path.exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

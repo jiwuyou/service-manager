@@ -13,13 +13,17 @@ use serde::Deserialize;
 use crate::{
     assets, auth,
     error::{AppError, Result},
-    model::{LogsOptions, ServiceId, ServiceSpec},
+    model::{Action, LogsOptions, ServiceId, ServiceSpec},
     server::{AppState, health_payload},
 };
 
 pub fn router(state: AppState) -> Router {
     let protected: Router<AppState> = Router::new()
         .route("/providers", get(providers_list))
+        .route("/groups", get(groups_list))
+        .route("/groups/:name/start", post(group_start))
+        .route("/groups/:name/stop", post(group_stop))
+        .route("/groups/:name/restart", post(group_restart))
         .route("/services", get(services_list).post(services_create))
         .route(
             "/services/:id",
@@ -77,6 +81,35 @@ async fn providers_list(State(state): State<AppState>) -> Result<Json<serde_json
 async fn services_list(State(state): State<AppState>) -> Result<Json<serde_json::Value>> {
     let svcs = state.engine.list_services()?;
     Ok(Json(serde_json::to_value(svcs)?))
+}
+
+async fn groups_list(State(state): State<AppState>) -> Result<Json<serde_json::Value>> {
+    let groups = state.engine.list_groups()?;
+    Ok(Json(serde_json::to_value(groups)?))
+}
+
+async fn group_start(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let out = state.engine.group_action(&name, Action::Start).await?;
+    Ok(Json(serde_json::to_value(out)?))
+}
+
+async fn group_stop(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let out = state.engine.group_action(&name, Action::Stop).await?;
+    Ok(Json(serde_json::to_value(out)?))
+}
+
+async fn group_restart(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let out = state.engine.group_action(&name, Action::Restart).await?;
+    Ok(Json(serde_json::to_value(out)?))
 }
 
 async fn services_create(State(state): State<AppState>, body: Bytes) -> Result<impl IntoResponse> {
@@ -536,6 +569,88 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/services/{id}"))
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn group_lifecycle() {
+        let (state, tok) = test_state();
+        let app = super::router(state);
+
+        for name in ["demo-a", "demo-b"] {
+            let spec = serde_json::json!({
+                "name": name,
+                "provider": "fake",
+                "command": ["echo", name],
+                "restart": {"mode": "no", "max_retries": 0},
+                "tags": ["group:local-stack"]
+            });
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/services")
+                        .header(AUTHORIZATION, format!("Bearer {tok}"))
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(spec.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::CREATED);
+        }
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/groups")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let groups: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(groups.as_array().unwrap().len(), 1);
+        assert_eq!(groups[0]["name"], "local-stack");
+        assert_eq!(groups[0]["service_ids"].as_array().unwrap().len(), 2);
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/groups/local-stack/start")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["group"], "local-stack");
+        assert_eq!(result["action"], "start");
+        assert_eq!(result["total"], 2);
+        assert_eq!(result["succeeded"].as_array().unwrap().len(), 2);
+        assert_eq!(result["failed"].as_array().unwrap().len(), 0);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/groups/missing/start")
                     .header(AUTHORIZATION, format!("Bearer {tok}"))
                     .body(Body::empty())
                     .unwrap(),
