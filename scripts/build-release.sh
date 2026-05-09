@@ -10,7 +10,11 @@ Usage:
 
 Builds:
   - cargo build --release
-  - dist/service-manager-<version>-<os>-<arch>.tar.gz
+  - dist/service-manager-<platform>.tar.gz
+
+Platform:
+  - Linux/macOS: service-manager-<version>-<os>-<arch>.tar.gz
+  - Termux:      service-manager-<version>-termux-<arch>.tar.gz
 
 Includes:
   - service-manager binary
@@ -37,8 +41,12 @@ fi
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"
+platform_os="${os}"
+if [[ -n "${PREFIX:-}" && "${PREFIX}" == *"com.termux"* ]]; then
+  platform_os="termux"
+fi
 
-echo "building (${os}/${arch})..."
+echo "building (${platform_os}/${arch})..."
 cargo build --release
 
 bin_path="${repo_root}/target/release/${BIN_NAME}"
@@ -50,7 +58,7 @@ fi
 dist="${repo_root}/dist"
 mkdir -p "${dist}"
 
-pkg_dir="${dist}/${BIN_NAME}-${version}-${os}-${arch}"
+pkg_dir="${dist}/${BIN_NAME}-${version}-${platform_os}-${arch}"
 rm -rf "${pkg_dir}"
 mkdir -p "${pkg_dir}"
 
