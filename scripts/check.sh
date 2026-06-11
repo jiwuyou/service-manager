@@ -62,9 +62,9 @@ echo "  export SERVICE_MANAGER_TOKEN=...   # overrides config when config token 
 
 echo
 echo "serve:"
-echo "  ${BIN_NAME} serve --bind 127.0.0.1:8787"
+echo "  ${BIN_NAME} serve --bind 127.0.0.1:20087"
 
-url="${SERVICE_MANAGER_URL:-http://127.0.0.1:8787/}"
+url="${SERVICE_MANAGER_URL:-http://127.0.0.1:20087/}"
 
 if command -v curl >/dev/null 2>&1; then
   if curl -fsS --max-time 2 "${url}" >/dev/null 2>&1; then

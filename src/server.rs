@@ -23,7 +23,7 @@ use crate::{
     store::JsonStore,
 };
 
-pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8787";
+pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:20087";
 pub const ENV_AUTH_TOKEN: &str = "SERVICE_MANAGER_TOKEN";
 const GROUP_TAG_PREFIX: &str = "group:";
 

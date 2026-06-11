@@ -10,7 +10,7 @@ Usage:
 
 Environment:
   INSTALL_DIR   Override install directory (default: $PREFIX/bin on Termux, else $HOME/.local/bin)
-  BIND          Bind address for guidance output (default: 127.0.0.1:8787)
+  BIND          Bind address for guidance output (default: 127.0.0.1:20087)
   CONFIG_PATH   Override config path for guidance output
   INSTALL_SERVICE=1  Attempt to run "service-manager install-service" after install (best-effort)
   SERVICE_MANAGER_INSTALL_MODE
@@ -38,7 +38,7 @@ fi
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"
-bind="${BIND:-127.0.0.1:8787}"
+bind="${BIND:-127.0.0.1:20087}"
 mode="${SERVICE_MANAGER_INSTALL_MODE:-auto}"
 platform_os="${os}"
 if [[ "${is_termux}" == "1" ]]; then

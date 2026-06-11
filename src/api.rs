@@ -8,12 +8,12 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     assets, auth,
     error::{AppError, Result},
-    model::{Action, LogsOptions, ServiceId, ServiceSpec},
+    model::{Action, LogsOptions, Service, ServiceId, ServiceSpec, ServiceStatus},
     server::{AppState, health_payload},
 };
 
@@ -21,10 +21,12 @@ pub fn router(state: AppState) -> Router {
     let protected: Router<AppState> = Router::new()
         .route("/providers", get(providers_list))
         .route("/groups", get(groups_list))
+        .route("/groups/:name/status", get(group_status))
         .route("/groups/:name/start", post(group_start))
         .route("/groups/:name/stop", post(group_stop))
         .route("/groups/:name/restart", post(group_restart))
         .route("/services", get(services_list).post(services_create))
+        .route("/services/statuses", get(services_statuses))
         .route(
             "/services/:id",
             get(services_get)
@@ -78,14 +80,34 @@ async fn providers_list(State(state): State<AppState>) -> Result<Json<serde_json
     Ok(Json(serde_json::to_value(out)?))
 }
 
-async fn services_list(State(state): State<AppState>) -> Result<Json<serde_json::Value>> {
-    let svcs = state.engine.list_services()?;
+async fn services_list(
+    State(state): State<AppState>,
+    Query(q): Query<ServicesQuery>,
+) -> Result<Json<serde_json::Value>> {
+    let filters = ServiceFilters::from_query(&q);
+    let svcs = filter_services(state.engine.list_services()?, &filters);
     Ok(Json(serde_json::to_value(svcs)?))
 }
 
 async fn groups_list(State(state): State<AppState>) -> Result<Json<serde_json::Value>> {
     let groups = state.engine.list_groups()?;
     Ok(Json(serde_json::to_value(groups)?))
+}
+
+async fn group_status(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let group = name.trim();
+    if group.is_empty() {
+        return Err(AppError::BadRequest("group name is required".to_string()));
+    }
+
+    let Some(svc_group) = state.engine.list_groups()?.into_iter().find(|g| g.name == group) else {
+        return Err(AppError::NotFound);
+    };
+    let out = collect_service_statuses(&state, svc_group.services).await;
+    Ok(Json(serde_json::to_value(out)?))
 }
 
 async fn group_start(
@@ -116,6 +138,16 @@ async fn services_create(State(state): State<AppState>, body: Bytes) -> Result<i
     let spec: ServiceSpec = parse_json_body(&body)?;
     let svc = state.engine.create_service(spec).await?;
     Ok((StatusCode::CREATED, Json(serde_json::to_value(svc)?)))
+}
+
+async fn services_statuses(
+    State(state): State<AppState>,
+    Query(q): Query<ServicesQuery>,
+) -> Result<Json<serde_json::Value>> {
+    let filters = ServiceFilters::from_query(&q);
+    let svcs = filter_services(state.engine.list_services()?, &filters);
+    let out = collect_service_statuses(&state, svcs).await;
+    Ok(Json(serde_json::to_value(out)?))
 }
 
 async fn services_get(
@@ -267,6 +299,101 @@ fn parse_usize_opt(s: Option<&str>) -> Result<Option<usize>> {
         .parse()
         .map_err(|_| AppError::BadRequest("invalid limit".to_string()))?;
     Ok(Some(n))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ServicesQuery {
+    tag: Option<String>,
+    tags: Option<String>,
+    group: Option<String>,
+    groups: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct ServiceFilters {
+    tags: Vec<String>,
+    groups: Vec<String>,
+}
+
+impl ServiceFilters {
+    fn from_query(q: &ServicesQuery) -> Self {
+        let mut filters = Self::default();
+        collect_selector_values(q.tag.as_deref(), &mut filters.tags);
+        collect_selector_values(q.tags.as_deref(), &mut filters.tags);
+        collect_selector_values(q.group.as_deref(), &mut filters.groups);
+        collect_selector_values(q.groups.as_deref(), &mut filters.groups);
+        filters
+    }
+
+    fn matches(&self, svc: &Service) -> bool {
+        self.tags
+            .iter()
+            .all(|want| svc.spec.tags.iter().any(|tag| tag.trim() == want))
+            && self.groups.iter().all(|want| {
+                svc.spec.tags.iter().any(|tag| {
+                    tag.trim()
+                        .strip_prefix("group:")
+                        .map(|name| name.trim() == want)
+                        .unwrap_or(false)
+                })
+            })
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ServiceStatusItem {
+    service: Service,
+    #[serde(default)]
+    status: Option<ServiceStatus>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    error: String,
+}
+
+fn collect_selector_values(raw: Option<&str>, out: &mut Vec<String>) {
+    let Some(raw) = raw else {
+        return;
+    };
+    for part in raw.split(',') {
+        let value = part.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|existing| existing == value) {
+            out.push(value.to_string());
+        }
+    }
+}
+
+fn filter_services(services: Vec<Service>, filters: &ServiceFilters) -> Vec<Service> {
+    if filters.tags.is_empty() && filters.groups.is_empty() {
+        return services;
+    }
+    services
+        .into_iter()
+        .filter(|svc| filters.matches(svc))
+        .collect()
+}
+
+async fn collect_service_statuses(
+    state: &AppState,
+    services: Vec<Service>,
+) -> Vec<ServiceStatusItem> {
+    let mut out = Vec::with_capacity(services.len());
+    for svc in services {
+        match state.engine.status(&svc.id).await {
+            Ok(status) => out.push(ServiceStatusItem {
+                service: svc,
+                status: Some(status),
+                error: String::new(),
+            }),
+            Err(e) => out.push(ServiceStatusItem {
+                service: svc,
+                status: None,
+                error: e.to_string(),
+            }),
+        }
+    }
+    out
 }
 
 // Silence unused imports if we later want to add headers for web assets.
@@ -651,6 +778,142 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/groups/missing/start")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn service_filters_and_bulk_statuses() {
+        let (state, tok) = test_state();
+        let app = super::router(state);
+
+        let mut ids = Vec::new();
+        for (name, tags) in [
+            ("phone-ai", vec!["smallphoneai", "group:phone-control"]),
+            ("phone-app", vec!["smallphone", "group:phone-control"]),
+            ("other", vec!["other", "group:other"]),
+        ] {
+            let spec = serde_json::json!({
+                "name": name,
+                "provider": "fake",
+                "command": ["echo", name],
+                "restart": {"mode": "no", "max_retries": 0},
+                "tags": tags
+            });
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/services")
+                        .header(AUTHORIZATION, format!("Bearer {tok}"))
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(spec.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::CREATED);
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            let svc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            ids.push(svc["id"].as_str().unwrap().to_string());
+        }
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/services/{}/start", ids[0]))
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/services?tag=smallphoneai")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let services: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(services.as_array().unwrap().len(), 1);
+        assert_eq!(services[0]["spec"]["name"], "phone-ai");
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/services?group=phone-control")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let services: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(services.as_array().unwrap().len(), 2);
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/services/statuses?group=phone-control")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let statuses: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(statuses.as_array().unwrap().len(), 2);
+        assert!(
+            statuses
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["status"]["state"] == "running")
+        );
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/groups/phone-control/status")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let statuses: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(statuses.as_array().unwrap().len(), 2);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/groups/missing/status")
                     .header(AUTHORIZATION, format!("Bearer {tok}"))
                     .body(Body::empty())
                     .unwrap(),

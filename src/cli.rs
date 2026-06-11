@@ -20,7 +20,7 @@ pub enum Command {
         /// Path to config JSON. Defaults to ${UserConfigDir}/service-manager/config.json.
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Bind address (host:port). Defaults to 127.0.0.1:8787.
+        /// Bind address (host:port). Defaults to 127.0.0.1:20087.
         #[arg(long)]
         bind: Option<String>,
     },
@@ -43,7 +43,7 @@ pub enum Command {
         /// Path to config JSON. Defaults to ${UserConfigDir}/service-manager/config.json.
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Bind address (host:port). Defaults to 127.0.0.1:8787.
+        /// Bind address (host:port). Defaults to 127.0.0.1:20087.
         #[arg(long)]
         bind: Option<String>,
     },

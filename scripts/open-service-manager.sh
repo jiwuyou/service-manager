@@ -2,9 +2,9 @@
 set -eu
 
 APP_DIR="/root/projects/service-manager"
-BIND_ADDR="127.0.0.1:8787"
+BIND_ADDR="127.0.0.1:20087"
 URL="http://${BIND_ADDR}/"
-LOG_FILE="/tmp/service-manager-8787.log"
+LOG_FILE="/tmp/service-manager-20087.log"
 
 cd "$APP_DIR"
 

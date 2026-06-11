@@ -33,13 +33,13 @@ cargo build --release
 默认监听：
 
 ```text
-127.0.0.1:8787
+127.0.0.1:20087
 ```
 
 打开 Web UI：
 
 ```text
-http://127.0.0.1:8787/
+http://127.0.0.1:20087/
 ```
 
 查看 token：
@@ -118,7 +118,7 @@ ${data_dir}/store.json
 
 ```json
 {
-  "listen_addr": "127.0.0.1:8787",
+  "listen_addr": "127.0.0.1:20087",
   "data_dir": "/home/me/.config/service-manager/data",
   "auth_token": "",
   "log_level": "info",
@@ -147,7 +147,7 @@ service-manager serve
 指定监听地址：
 
 ```bash
-service-manager serve --bind 127.0.0.1:8787
+service-manager serve --bind 127.0.0.1:20087
 ```
 
 指定配置文件：
@@ -202,7 +202,7 @@ Web UI 由同一个二进制直接提供，不需要 Node 构建。
 页面地址：
 
 ```text
-http://127.0.0.1:8787/
+http://127.0.0.1:20087/
 ```
 
 如果显示未授权，先运行：
@@ -218,7 +218,7 @@ service-manager token show
 健康检查不需要鉴权：
 
 ```bash
-curl -fsS http://127.0.0.1:8787/api/v1/health
+curl -fsS http://127.0.0.1:20087/api/v1/health
 ```
 
 其他 API 都需要：
@@ -238,7 +238,7 @@ TOKEN="$(service-manager token show | head -n1)"
 ```bash
 curl -fsS \
   -H "Authorization: Bearer $TOKEN" \
-  http://127.0.0.1:8787/api/v1/providers
+  http://127.0.0.1:20087/api/v1/providers
 ```
 
 查看服务列表：
@@ -246,7 +246,39 @@ curl -fsS \
 ```bash
 curl -fsS \
   -H "Authorization: Bearer $TOKEN" \
-  http://127.0.0.1:8787/api/v1/services
+  http://127.0.0.1:20087/api/v1/services
+```
+
+按标签或分组过滤服务：
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:20087/api/v1/services?tag=smallphoneai"
+
+curl -fsS \
+  -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:20087/api/v1/services?group=phone-control"
+```
+
+批量查看状态：
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:20087/api/v1/services/statuses?group=phone-control"
+
+curl -fsS \
+  -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:20087/api/v1/groups/phone-control/status
+```
+
+分组控制：
+
+```bash
+curl -fsS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:20087/api/v1/groups/phone-control/restart
 ```
 
 创建一个 `process` 服务：
@@ -268,7 +300,7 @@ curl -fsS \
     "enabled": true,
     "tags": ["demo"]
   }' \
-  http://127.0.0.1:8787/api/v1/services
+  http://127.0.0.1:20087/api/v1/services
 ```
 
 返回里会包含服务 `id`。后续假设：
@@ -282,7 +314,7 @@ SERVICE_ID="..."
 ```bash
 curl -fsS -X POST \
   -H "Authorization: Bearer $TOKEN" \
-  http://127.0.0.1:8787/api/v1/services/$SERVICE_ID/start
+  http://127.0.0.1:20087/api/v1/services/$SERVICE_ID/start
 ```
 
 查看状态：
@@ -290,7 +322,7 @@ curl -fsS -X POST \
 ```bash
 curl -fsS \
   -H "Authorization: Bearer $TOKEN" \
-  http://127.0.0.1:8787/api/v1/services/$SERVICE_ID/status
+  http://127.0.0.1:20087/api/v1/services/$SERVICE_ID/status
 ```
 
 查看日志：
@@ -298,7 +330,7 @@ curl -fsS \
 ```bash
 curl -fsS \
   -H "Authorization: Bearer $TOKEN" \
-  "http://127.0.0.1:8787/api/v1/services/$SERVICE_ID/logs?limit=100"
+  "http://127.0.0.1:20087/api/v1/services/$SERVICE_ID/logs?limit=100"
 ```
 
 停止服务：
@@ -306,7 +338,7 @@ curl -fsS \
 ```bash
 curl -fsS -X POST \
   -H "Authorization: Bearer $TOKEN" \
-  http://127.0.0.1:8787/api/v1/services/$SERVICE_ID/stop
+  http://127.0.0.1:20087/api/v1/services/$SERVICE_ID/stop
 ```
 
 删除服务：
@@ -314,7 +346,7 @@ curl -fsS -X POST \
 ```bash
 curl -fsS -X DELETE \
   -H "Authorization: Bearer $TOKEN" \
-  http://127.0.0.1:8787/api/v1/services/$SERVICE_ID
+  http://127.0.0.1:20087/api/v1/services/$SERVICE_ID
 ```
 
 ## 服务规格
@@ -361,7 +393,19 @@ curl -fsS -X DELETE \
 - `restart.mode`：`no`、`on-failure`、`always`。
 - `health`：健康检查配置。
 - `enabled`：是否启用。
-- `tags`：标签。
+- `tags`：标签。分组使用 `group:<name>` 标签，例如 `group:phone-control`。
+
+服务列表和状态接口支持 `tag` / `tags`、`group` / `groups` 查询参数。多个值可以用逗号分隔，多个条件会同时匹配。`GET /api/v1/services/statuses` 和 `GET /api/v1/groups/:name/status` 返回数组，每一项形如：
+
+```json
+{
+  "service": {},
+  "status": {},
+  "error": ""
+}
+```
+
+如果某个 provider 查询状态失败，该项会包含 `error`，不会影响其他服务的状态结果。
 
 ## Provider 说明
 
@@ -552,7 +596,7 @@ service-manager doctor
 ```bash
 curl -fsS \
   -H "Authorization: Bearer $TOKEN" \
-  http://127.0.0.1:8787/api/v1/providers
+  http://127.0.0.1:20087/api/v1/providers
 ```
 
 ### systemd 显示 offline
@@ -582,7 +626,7 @@ command -v sv
 换端口：
 
 ```bash
-service-manager serve --bind 127.0.0.1:18787
+service-manager serve --bind 127.0.0.1:20088
 ```
 
 ### 启动服务后无法停止
@@ -606,4 +650,3 @@ service-manager doctor
 ```
 
 脚本会构建 release 二进制，并打包二进制、脚本和 README。
-

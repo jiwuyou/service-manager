@@ -6,7 +6,7 @@ Documentation:
 
 - Chinese usage guide: [docs/usage.zh-CN.md](docs/usage.zh-CN.md)
 
-The server binds to `127.0.0.1:8787` by default and protects all `/api/v1/*` endpoints with a bearer
+The server binds to `127.0.0.1:20087` by default and protects all `/api/v1/*` endpoints with a bearer
 token (except `/api/v1/health`).
 
 ## Install
@@ -71,12 +71,12 @@ service-manager serve
 Override bind/config paths:
 
 ```bash
-service-manager serve --bind 127.0.0.1:8787 --config /path/to/config.json
+service-manager serve --bind 127.0.0.1:20087 --config /path/to/config.json
 ```
 
 Web UI (served at the same origin as the API):
 
-- `http://127.0.0.1:8787/`
+- `http://127.0.0.1:20087/`
 
 Token utilities:
 
@@ -114,7 +114,7 @@ Example config:
 
 ```json
 {
-  "listen_addr": "127.0.0.1:8787",
+  "listen_addr": "127.0.0.1:20087",
   "data_dir": "/home/me/.config/service-manager/data",
   "auth_token": "",
   "log_level": "info",
@@ -140,7 +140,14 @@ All other endpoints require:
 Endpoints:
 
 - `GET /api/v1/providers`
+- `GET /api/v1/groups`
+- `GET /api/v1/groups/:name/status`
+- `POST /api/v1/groups/:name/start`
+- `POST /api/v1/groups/:name/stop`
+- `POST /api/v1/groups/:name/restart`
 - `GET /api/v1/services`
+- `GET /api/v1/services?tag=<tag>&group=<group>`
+- `GET /api/v1/services/statuses?tag=<tag>&group=<group>`
 - `POST /api/v1/services` (body: `ServiceSpec`)
 - `GET /api/v1/services/:id`
 - `PUT /api/v1/services/:id` (body: `ServiceSpec`)
@@ -156,11 +163,57 @@ Endpoints:
 - `GET /api/v1/export`
 - `POST /api/v1/import` (body: JSON export)
 
+Service list/status filters:
+
+- `tag` / `tags`: exact service tag match. Comma-separated values are allowed and all listed tags
+  must match.
+- `group` / `groups`: exact group name match. Groups are declared by service tags named
+  `group:<name>`, for example `group:phone-control`.
+- Filters can be combined. `GET /api/v1/services` with no filters still returns every service.
+- `GET /api/v1/services/statuses` returns an array of `{ "service": Service, "status":
+  ServiceStatus|null, "error": "" }` objects so one provider status failure does not hide other
+  services.
+- `GET /api/v1/groups/:name/status` uses the same status item shape and returns `404` when the
+  group does not exist.
+
 Error shape:
 
 ```json
 { "error": { "code": "bad_request", "message": "..." } }
 ```
+
+## App Control Surface
+
+The local API is the integration point for internal apps such as SmallPhoneAI and SmallPhone.
+Lifecycle control is intentionally bearer-token protected and local by default.
+
+Typical flow:
+
+```bash
+TOKEN="$(service-manager token show | sed -n '1p')"
+
+curl -fsS -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:20087/api/v1/services?group=phone-control
+
+curl -fsS -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:20087/api/v1/services/statuses?tag=smallphoneai
+
+curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:20087/api/v1/groups/phone-control/restart
+```
+
+CLI support today is for running the server, diagnostics, token management, and installing the
+service-manager daemon:
+
+- `service-manager serve`
+- `service-manager doctor`
+- `service-manager token show`
+- `service-manager token rotate`
+- `service-manager install-service`
+- `service-manager uninstall-service`
+
+Service registration and lifecycle operations are available through the authenticated REST API and
+Web UI.
 
 ## Providers
 
