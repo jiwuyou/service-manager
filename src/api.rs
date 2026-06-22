@@ -36,6 +36,7 @@ pub fn router(state: AppState) -> Router {
         .route("/services/:id/start", post(service_start))
         .route("/services/:id/stop", post(service_stop))
         .route("/services/:id/restart", post(service_restart))
+        .route("/services/:id/repair", post(service_repair))
         .route("/services/:id/register", post(service_register))
         .route("/services/:id/unregister", post(service_unregister))
         .route("/services/:id/status", get(service_status))
@@ -194,6 +195,14 @@ async fn service_restart(
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
     state.engine.restart(&ServiceId(id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn service_repair(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    state.engine.repair(&ServiceId(id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -548,6 +557,7 @@ mod tests {
         let cfg = Config {
             listen_addr: "127.0.0.1:0".to_string(),
             data_dir: base.to_string_lossy().to_string(),
+            service_registry_dir: base.join("services.d").to_string_lossy().to_string(),
             auth_token: token.clone(),
             log_level: "info".to_string(),
             store: StoreConfig {

@@ -110,12 +110,19 @@ Default store:
 
 - `${data_dir}/store.json` (atomic JSON store)
 
+OpenHouseAI service registry:
+
+- `${XDG_CONFIG_HOME:-$HOME/.config}/openhouseai/service-manager/services.d/*.json`
+- Override with `service_registry_dir` in config JSON.
+- Registry files are loaded on `service-manager serve` startup and upsert services by stable id.
+
 Example config:
 
 ```json
 {
   "listen_addr": "127.0.0.1:20087",
   "data_dir": "/home/me/.config/service-manager/data",
+  "service_registry_dir": "/home/me/.config/openhouseai/service-manager/services.d",
   "auth_token": "",
   "log_level": "info",
   "store": { "type": "json", "path": "" }
@@ -157,6 +164,7 @@ Endpoints:
 - `POST /api/v1/services/:id/start`
 - `POST /api/v1/services/:id/stop`
 - `POST /api/v1/services/:id/restart`
+- `POST /api/v1/services/:id/repair` (register + restart)
 - `GET /api/v1/services/:id/status`
 - `GET /api/v1/services/:id/logs?since=&until=&limit=`
 - `GET /api/v1/audit?limit=`

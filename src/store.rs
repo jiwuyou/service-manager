@@ -110,6 +110,22 @@ impl JsonStore {
         })
     }
 
+    pub fn upsert_service(&self, mut svc: Service) -> Result<()> {
+        if svc.id.0.trim().is_empty() {
+            return Err(AppError::BadRequest("service id is empty".to_string()));
+        }
+        let key = svc.id.0.clone();
+        self.stage_and_commit(move |staged| {
+            if let Some(existing) = staged.services.get(&key)
+                && existing.deleted_at.is_none()
+            {
+                svc.created_at = existing.created_at;
+            }
+            staged.services.insert(key, svc);
+            Ok(())
+        })
+    }
+
     pub fn delete_service(&self, id: &ServiceId) -> Result<()> {
         if id.0.trim().is_empty() {
             return Err(AppError::BadRequest("service id is empty".to_string()));

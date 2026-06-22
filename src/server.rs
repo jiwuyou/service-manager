@@ -20,11 +20,13 @@ use crate::{
         ServiceId, ServiceSpec, ServiceStatus,
     },
     providers,
+    service_registry,
     store::JsonStore,
 };
 
 pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:20087";
 pub const ENV_AUTH_TOKEN: &str = "SERVICE_MANAGER_TOKEN";
+pub const ENV_SERVICE_REGISTRY_DIR: &str = "OPENHOUSEAI_SERVICE_MANAGER_SERVICES_DIR";
 const GROUP_TAG_PREFIX: &str = "group:";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,6 +52,8 @@ pub struct Config {
     pub listen_addr: String,
     #[serde(default)]
     pub data_dir: String,
+    #[serde(default)]
+    pub service_registry_dir: String,
     #[serde(default)]
     pub auth_token: String,
     #[serde(default)]
@@ -250,6 +254,54 @@ impl Engine {
         Ok(svc)
     }
 
+    pub fn upsert_registered_service(
+        &self,
+        id: ServiceId,
+        mut spec: ServiceSpec,
+    ) -> Result<Service> {
+        spec.validate()?;
+        if self.registry.get(&spec.provider).is_none() {
+            return Err(AppError::ProviderNotFound(spec.provider.0.clone()));
+        }
+
+        let id = ServiceId(validate_registry_service_id(id.0)?);
+        let now = (self.now)();
+        let created_at = match self.store.get_service(&id) {
+            Ok(existing) => {
+                if existing.spec.provider != spec.provider {
+                    return Err(AppError::BadRequest(format!(
+                        "provider cannot be changed for registered service {:?}",
+                        id.0
+                    )));
+                }
+                existing.created_at
+            }
+            Err(AppError::NotFound) => now,
+            Err(e) => return Err(e),
+        };
+
+        let svc = Service {
+            id: id.clone(),
+            spec,
+            created_at,
+            updated_at: now,
+            deleted_at: None,
+        };
+        self.store.upsert_service(svc.clone())?;
+
+        let _ = self.store.append_audit_event(AuditEvent {
+            id: new_id(16)?,
+            time: now,
+            action: Action::Register,
+            service_id: Some(id),
+            provider: Some(svc.spec.provider.clone()),
+            actor: "registry".to_string(),
+            details: "loaded from services.d".to_string(),
+        });
+
+        Ok(svc)
+    }
+
     pub async fn update_service(&self, id: &ServiceId, mut spec: ServiceSpec) -> Result<Service> {
         spec.validate()?;
         let existing = self.store.get_service(id)?;
@@ -402,6 +454,28 @@ impl Engine {
         Ok(())
     }
 
+    pub async fn repair(&self, id: &ServiceId) -> Result<()> {
+        let svc = self.store.get_service(id)?;
+        let p = self
+            .registry
+            .get(&svc.spec.provider)
+            .ok_or_else(|| AppError::ProviderNotFound(svc.spec.provider.0.clone()))?;
+
+        p.register(&svc).await?;
+        p.restart(&svc).await?;
+
+        let _ = self.store.append_audit_event(AuditEvent {
+            id: new_id(16)?,
+            time: (self.now)(),
+            action: Action::Repair,
+            service_id: Some(id.clone()),
+            provider: Some(svc.spec.provider),
+            actor: "api".to_string(),
+            details: "register + restart".to_string(),
+        });
+        Ok(())
+    }
+
     pub async fn register(&self, id: &ServiceId) -> Result<()> {
         let svc = self.store.get_service(id)?;
         let p = self
@@ -512,6 +586,34 @@ fn service_groups(svc: &Service) -> Vec<String> {
         .collect()
 }
 
+fn validate_registry_service_id(raw: String) -> Result<String> {
+    let value = raw.trim().to_string();
+    if value.is_empty() {
+        return Err(AppError::BadRequest("service registry id is empty".to_string()));
+    }
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return Err(AppError::BadRequest("service registry id is empty".to_string()));
+    };
+    if !first.is_ascii_alphanumeric() {
+        return Err(AppError::BadRequest(format!(
+            "invalid service registry id {:?}",
+            value
+        )));
+    }
+    let mut len = 1usize;
+    for ch in chars {
+        len += 1;
+        if len > 64 || !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')) {
+            return Err(AppError::BadRequest(format!(
+                "invalid service registry id {:?}",
+                value
+            )));
+        }
+    }
+    Ok(value)
+}
+
 pub async fn serve(cfg_path: Option<PathBuf>, bind: Option<String>) -> Result<()> {
     let loaded = load_config(cfg_path)?;
     let mut cfg = loaded.config;
@@ -537,6 +639,14 @@ pub async fn serve(cfg_path: Option<PathBuf>, bind: Option<String>) -> Result<()
     let registry = ProviderRegistry::new();
     providers::register_defaults(&registry, PathBuf::from(&cfg.data_dir))?;
     let engine = Arc::new(Engine::new(store, registry));
+    let loaded_services =
+        service_registry::load_from_dir(&engine, Path::new(&cfg.service_registry_dir))?;
+    if loaded_services > 0 {
+        info!(
+            "loaded {} registered services from {}",
+            loaded_services, cfg.service_registry_dir
+        );
+    }
     let state = AppState {
         config: cfg.clone(),
         engine,
@@ -627,9 +737,14 @@ pub fn load_config(path: Option<PathBuf>) -> Result<LoadedConfig> {
 pub fn default_config() -> Result<Config> {
     let cfg_dir = user_config_dir()?;
     let data_dir = cfg_dir.join("service-manager").join("data");
+    let service_registry_dir = cfg_dir
+        .join("openhouseai")
+        .join("service-manager")
+        .join("services.d");
     Ok(Config {
         listen_addr: DEFAULT_LISTEN_ADDR.to_string(),
         data_dir: data_dir.to_string_lossy().to_string(),
+        service_registry_dir: service_registry_dir.to_string_lossy().to_string(),
         auth_token: String::new(),
         log_level: "info".to_string(),
         store: StoreConfig {
@@ -648,6 +763,7 @@ pub fn default_config_path() -> Result<PathBuf> {
 struct ConfigFile {
     listen_addr: Option<String>,
     data_dir: Option<String>,
+    service_registry_dir: Option<String>,
     auth_token: Option<String>,
     log_level: Option<String>,
     store: Option<StoreConfigFile>,
@@ -667,6 +783,9 @@ impl ConfigFile {
         }
         if let Some(v) = self.data_dir {
             cfg.data_dir = v;
+        }
+        if let Some(v) = self.service_registry_dir {
+            cfg.service_registry_dir = v;
         }
         if let Some(v) = self.auth_token {
             cfg.auth_token = v;
@@ -699,6 +818,9 @@ fn apply_defaults(cfg: &mut Config) -> Result<()> {
     if cfg.data_dir.trim().is_empty() {
         cfg.data_dir = default_config()?.data_dir;
     }
+    if cfg.service_registry_dir.trim().is_empty() {
+        cfg.service_registry_dir = default_config()?.service_registry_dir;
+    }
     if cfg.store.path.trim().is_empty() {
         cfg.store.path = Path::new(&cfg.data_dir)
             .join("store.json")
@@ -717,6 +839,12 @@ fn apply_env(cfg: &mut Config) {
             cfg.auth_token = t;
         }
     }
+    if let Ok(dir) = env::var(ENV_SERVICE_REGISTRY_DIR) {
+        let value = dir.trim().to_string();
+        if !value.is_empty() {
+            cfg.service_registry_dir = value;
+        }
+    }
 }
 
 fn ensure_dirs(cfg: &Config) -> Result<()> {
@@ -724,6 +852,9 @@ fn ensure_dirs(cfg: &Config) -> Result<()> {
         return Err(AppError::BadRequest("config data_dir is empty".to_string()));
     }
     create_dir_all_700(Path::new(&cfg.data_dir))?;
+    if !cfg.service_registry_dir.trim().is_empty() {
+        create_dir_all_700(Path::new(&cfg.service_registry_dir))?;
+    }
 
     if !cfg.store.path.trim().is_empty()
         && let Some(parent) = Path::new(&cfg.store.path).parent()

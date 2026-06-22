@@ -6,6 +6,7 @@ mod doctor;
 mod error;
 mod model;
 mod providers;
+mod service_registry;
 mod server;
 mod store;
 

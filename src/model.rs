@@ -50,6 +50,7 @@ pub enum Action {
     Start,
     Stop,
     Restart,
+    Repair,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
