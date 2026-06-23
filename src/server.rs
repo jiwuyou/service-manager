@@ -19,7 +19,7 @@ use crate::{
         GroupActionSkip, LogsOptions, Provider, ProviderId, ProviderInfo, Service, ServiceGroup,
         ServiceId, ServiceSpec, ServiceStatus,
     },
-    providers,
+    openhouse_registry, providers,
     service_registry,
     store::JsonStore,
 };
@@ -54,6 +54,10 @@ pub struct Config {
     pub data_dir: String,
     #[serde(default)]
     pub service_registry_dir: String,
+    #[serde(default)]
+    pub openhouse_registry_source_dir: String,
+    #[serde(default)]
+    pub openhouse_registry_target_dir: String,
     #[serde(default)]
     pub auth_token: String,
     #[serde(default)]
@@ -300,6 +304,14 @@ impl Engine {
         });
 
         Ok(svc)
+    }
+
+    pub fn export_store_snapshot(&self) -> Result<Vec<u8>> {
+        self.store.export()
+    }
+
+    pub fn restore_store_snapshot(&self, snapshot: &[u8]) -> Result<()> {
+        self.store.import(snapshot)
     }
 
     pub async fn update_service(&self, id: &ServiceId, mut spec: ServiceSpec) -> Result<Service> {
@@ -741,10 +753,13 @@ pub fn default_config() -> Result<Config> {
         .join("openhouseai")
         .join("service-manager")
         .join("services.d");
+    let openhouse_registry_source_dir = cfg_dir.join("openhouseai");
     Ok(Config {
         listen_addr: DEFAULT_LISTEN_ADDR.to_string(),
         data_dir: data_dir.to_string_lossy().to_string(),
         service_registry_dir: service_registry_dir.to_string_lossy().to_string(),
+        openhouse_registry_source_dir: openhouse_registry_source_dir.to_string_lossy().to_string(),
+        openhouse_registry_target_dir: openhouse_registry::DEFAULT_TARGET_DIR.to_string(),
         auth_token: String::new(),
         log_level: "info".to_string(),
         store: StoreConfig {
@@ -764,6 +779,8 @@ struct ConfigFile {
     listen_addr: Option<String>,
     data_dir: Option<String>,
     service_registry_dir: Option<String>,
+    openhouse_registry_source_dir: Option<String>,
+    openhouse_registry_target_dir: Option<String>,
     auth_token: Option<String>,
     log_level: Option<String>,
     store: Option<StoreConfigFile>,
@@ -786,6 +803,12 @@ impl ConfigFile {
         }
         if let Some(v) = self.service_registry_dir {
             cfg.service_registry_dir = v;
+        }
+        if let Some(v) = self.openhouse_registry_source_dir {
+            cfg.openhouse_registry_source_dir = v;
+        }
+        if let Some(v) = self.openhouse_registry_target_dir {
+            cfg.openhouse_registry_target_dir = v;
         }
         if let Some(v) = self.auth_token {
             cfg.auth_token = v;
@@ -821,6 +844,12 @@ fn apply_defaults(cfg: &mut Config) -> Result<()> {
     if cfg.service_registry_dir.trim().is_empty() {
         cfg.service_registry_dir = default_config()?.service_registry_dir;
     }
+    if cfg.openhouse_registry_source_dir.trim().is_empty() {
+        cfg.openhouse_registry_source_dir = default_config()?.openhouse_registry_source_dir;
+    }
+    if cfg.openhouse_registry_target_dir.trim().is_empty() {
+        cfg.openhouse_registry_target_dir = default_config()?.openhouse_registry_target_dir;
+    }
     if cfg.store.path.trim().is_empty() {
         cfg.store.path = Path::new(&cfg.data_dir)
             .join("store.json")
@@ -845,6 +874,23 @@ fn apply_env(cfg: &mut Config) {
             cfg.service_registry_dir = value;
         }
     }
+    if let Ok(dir) = env::var(openhouse_registry::ENV_SOURCE_DIR) {
+        let value = dir.trim().to_string();
+        if !value.is_empty() {
+            cfg.openhouse_registry_source_dir = value.clone();
+            cfg.service_registry_dir = Path::new(&value)
+                .join("service-manager")
+                .join("services.d")
+                .to_string_lossy()
+                .to_string();
+        }
+    }
+    if let Ok(dir) = env::var(openhouse_registry::ENV_TARGET_DIR) {
+        let value = dir.trim().to_string();
+        if !value.is_empty() {
+            cfg.openhouse_registry_target_dir = value;
+        }
+    }
 }
 
 fn ensure_dirs(cfg: &Config) -> Result<()> {
@@ -854,6 +900,9 @@ fn ensure_dirs(cfg: &Config) -> Result<()> {
     create_dir_all_700(Path::new(&cfg.data_dir))?;
     if !cfg.service_registry_dir.trim().is_empty() {
         create_dir_all_700(Path::new(&cfg.service_registry_dir))?;
+    }
+    if !cfg.openhouse_registry_source_dir.trim().is_empty() {
+        create_dir_all_700(Path::new(&cfg.openhouse_registry_source_dir))?;
     }
 
     if !cfg.store.path.trim().is_empty()

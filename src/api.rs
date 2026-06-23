@@ -14,6 +14,7 @@ use crate::{
     assets, auth,
     error::{AppError, Result},
     model::{Action, LogsOptions, Service, ServiceId, ServiceSpec, ServiceStatus},
+    openhouse_registry,
     server::{AppState, health_payload},
 };
 
@@ -44,6 +45,16 @@ pub fn router(state: AppState) -> Router {
         .route("/audit", get(audit_list))
         .route("/export", get(export_store))
         .route("/import", post(import_store))
+        .route("/registry/state", get(registry_state))
+        .route("/registry/components", get(registry_components))
+        .route(
+            "/registry/components/:id",
+            get(registry_component_get)
+                .put(registry_component_put)
+                .delete(registry_component_delete),
+        )
+        .route("/registry/sync", post(registry_sync))
+        .route("/registry/apply", post(registry_apply))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer_token,
@@ -278,6 +289,108 @@ async fn export_store(State(state): State<AppState>) -> Result<Response> {
 async fn import_store(State(state): State<AppState>, body: Bytes) -> Result<StatusCode> {
     state.engine.import(&body)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn registry_state(State(state): State<AppState>) -> Result<Json<serde_json::Value>> {
+    let cfg = registry_config(&state);
+    let out = openhouse_registry::read_state(&cfg)?;
+    Ok(Json(serde_json::to_value(out)?))
+}
+
+async fn registry_components(State(state): State<AppState>) -> Result<Json<serde_json::Value>> {
+    let cfg = registry_config(&state);
+    let out = openhouse_registry::list_components(&cfg)?;
+    Ok(Json(serde_json::to_value(out)?))
+}
+
+async fn registry_component_get(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let cfg = registry_config(&state);
+    let out = openhouse_registry::get_component(&cfg, &id)?;
+    Ok(Json(serde_json::to_value(out)?))
+}
+
+async fn registry_component_put(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>> {
+    let manifest: serde_json::Value = parse_json_body(&body)?;
+    let cfg = registry_config(&state);
+    let component = openhouse_registry::put_component(&cfg, &id, manifest)?;
+    let state = openhouse_registry::sync_registry(&cfg)?;
+    let out = openhouse_registry::RegistryMutationResult {
+        component: Some(component),
+        state,
+    };
+    Ok(Json(serde_json::to_value(out)?))
+}
+
+async fn registry_component_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let cfg = registry_config(&state);
+    openhouse_registry::delete_component(&cfg, &id)?;
+    let out = openhouse_registry::sync_registry(&cfg)?;
+    Ok(Json(serde_json::to_value(out)?))
+}
+
+async fn registry_sync(State(state): State<AppState>) -> Result<Json<serde_json::Value>> {
+    let cfg = registry_config(&state);
+    let out = openhouse_registry::sync_registry(&cfg)?;
+    Ok(Json(serde_json::to_value(out)?))
+}
+
+async fn registry_apply(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>> {
+    let request: openhouse_registry::RegistryApplyRequest = parse_json_body(&body)?;
+    let prepared = openhouse_registry::prepare_apply_request(request)?;
+    for (_, spec) in &prepared.services {
+        if state.engine.registry().get(&spec.provider).is_none() {
+            return Err(AppError::ProviderNotFound(spec.provider.0.clone()));
+        }
+    }
+
+    let store_snapshot = if prepared.services.is_empty() {
+        None
+    } else {
+        Some(state.engine.export_store_snapshot()?)
+    };
+    for (id, spec) in &prepared.services {
+        if let Err(err) = state
+            .engine
+            .upsert_registered_service(ServiceId(id.clone()), spec.clone())
+        {
+            if let Some(snapshot) = store_snapshot.as_deref() {
+                let _ = state.engine.restore_store_snapshot(snapshot);
+            }
+            return Err(err);
+        }
+    }
+
+    let cfg = registry_config(&state);
+    let out = match openhouse_registry::apply_prepared_registry(&cfg, &prepared) {
+        Ok(out) => out,
+        Err(err) => {
+            if let Some(snapshot) = store_snapshot.as_deref() {
+                let _ = state.engine.restore_store_snapshot(snapshot);
+            }
+            return Err(err);
+        }
+    };
+    Ok(Json(serde_json::to_value(out)?))
+}
+
+fn registry_config(state: &AppState) -> openhouse_registry::RegistryConfig {
+    openhouse_registry::RegistryConfig::new(
+        state.config.openhouse_registry_source_dir.clone(),
+        state.config.openhouse_registry_target_dir.clone(),
+    )
 }
 
 fn parse_json_body<T: serde::de::DeserializeOwned>(b: &[u8]) -> Result<T> {
@@ -558,6 +671,11 @@ mod tests {
             listen_addr: "127.0.0.1:0".to_string(),
             data_dir: base.to_string_lossy().to_string(),
             service_registry_dir: base.join("services.d").to_string_lossy().to_string(),
+            openhouse_registry_source_dir: base.join("openhouseai").to_string_lossy().to_string(),
+            openhouse_registry_target_dir: base
+                .join("termux-openhouseai")
+                .to_string_lossy()
+                .to_string(),
             auth_token: token.clone(),
             log_level: "info".to_string(),
             store: StoreConfig {
@@ -979,5 +1097,159 @@ mod tests {
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["error"]["code"], "provider_not_found");
+    }
+
+    #[tokio::test]
+    async fn registry_component_put_syncs_to_target() {
+        let (state, tok) = test_state();
+        let source_dir = PathBuf::from(&state.config.openhouse_registry_source_dir);
+        let target_dir = PathBuf::from(&state.config.openhouse_registry_target_dir);
+        let app = super::router(state);
+
+        let manifest = serde_json::json!({
+            "schemaVersion": 1,
+            "id": "demo",
+            "title": "Demo",
+            "shellMenu": {},
+            "smallphoneApp": {},
+            "serviceManager": {},
+            "ai": {}
+        });
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/registry/components/demo")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(manifest.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(source_dir.join("components.d/demo.json").is_file());
+        assert!(target_dir.join("components.d/demo.json").is_file());
+        assert!(target_dir.join("registry-state.json").is_file());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/registry/components")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let components: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(components.as_array().unwrap().len(), 1);
+        assert_eq!(components[0]["id"], "demo");
+    }
+
+    #[tokio::test]
+    async fn registry_apply_syncs_services_and_rejects_legacy_fields() {
+        let (state, tok) = test_state();
+        let source_dir = PathBuf::from(&state.config.openhouse_registry_source_dir);
+        let target_dir = PathBuf::from(&state.config.openhouse_registry_target_dir);
+        let app = super::router(state);
+
+        let legacy = serde_json::json!({
+            "component": {
+                "schemaVersion": 1,
+                "id": "demo",
+                "title": "Demo",
+                "shellMenu": {},
+                "smallphoneApp": {},
+                "serviceManager": {},
+                "ai": {}
+            },
+            "serviceRegistry": {}
+        });
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/registry/apply")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(legacy.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        let payload = serde_json::json!({
+            "component": {
+                "schemaVersion": 1,
+                "id": "demo",
+                "title": "Demo",
+                "shellMenu": {},
+                "smallphoneApp": {},
+                "serviceManager": {},
+                "ai": {}
+            },
+            "services": [
+                {
+                    "id": "demo-service",
+                    "service": {
+                        "name": "demo-service",
+                        "provider": "fake",
+                        "command": ["echo", "demo"],
+                        "restart": {"mode": "no", "max_retries": 0},
+                        "tags": ["openhouse-component:demo"]
+                    }
+                }
+            ],
+            "aiDocs": [
+                {
+                    "path": "demo/openhouse.ai.md",
+                    "content": "# Demo\n"
+                }
+            ]
+        });
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/registry/apply")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(source_dir.join("components.d/demo.json").is_file());
+        assert!(source_dir.join("service-manager/services.d/demo-service.json").is_file());
+        assert!(source_dir.join("ai-docs/demo/openhouse.ai.md").is_file());
+        assert!(target_dir.join("components.d/demo.json").is_file());
+        assert!(target_dir.join("service-manager/services.d/demo-service.json").is_file());
+        assert!(target_dir.join("ai-docs/demo/openhouse.ai.md").is_file());
+        assert!(target_dir.join("registry-state.json").is_file());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/services?tag=openhouse-component:demo")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let services: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(services.as_array().unwrap().len(), 1);
+        assert_eq!(services[0]["id"], "demo-service");
+        assert_eq!(services[0]["spec"]["name"], "demo-service");
     }
 }

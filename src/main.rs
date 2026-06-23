@@ -5,6 +5,7 @@ mod cli;
 mod doctor;
 mod error;
 mod model;
+mod openhouse_registry;
 mod providers;
 mod service_registry;
 mod server;
