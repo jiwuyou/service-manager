@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::{AppError, Result};
 
@@ -208,32 +208,76 @@ fn default_true() -> bool {
     true
 }
 
+fn default_repair_timeout() -> DurationDef {
+    DurationDef(Duration::from_secs(10 * 60))
+}
+
+const REPAIR_RUNTIME_KEY: &str = "service-manager.repair";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RepairHookMode {
+    Hook,
+    Script,
+}
+
+impl Default for RepairHookMode {
+    fn default() -> Self {
+        Self::Hook
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ServiceSpec {
-    pub name: String,
+pub struct RepairHook {
     #[serde(default)]
-    pub description: String,
-    pub provider: ProviderId,
+    pub mode: RepairHookMode,
     #[serde(default)]
-    pub command: Vec<String>, // argv; command[0] is executable
+    pub command: Vec<String>,
     #[serde(default)]
     pub working_dir: String,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default = "default_repair_timeout")]
+    pub timeout: DurationDef,
+}
+
+impl RepairHook {
+    pub fn validate(&mut self) -> Result<()> {
+        self.working_dir = self.working_dir.trim().to_string();
+        if self.command.is_empty() {
+            return Err(AppError::BadRequest(
+                "repair.command is required when repair is configured".to_string(),
+            ));
+        }
+        for (i, part) in self.command.iter().enumerate() {
+            if part.trim().is_empty() {
+                return Err(AppError::BadRequest(format!("repair.command[{i}] is empty")));
+            }
+        }
+        if self.timeout.0.is_zero() {
+            self.timeout = default_repair_timeout();
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceSpec {
+    pub name: String,
+    pub description: String,
+    pub provider: ProviderId,
+    pub command: Vec<String>, // argv; command[0] is executable
+    pub working_dir: String,
+    pub env: BTreeMap<String, String>,
 
     // Provider-specific options. Schema intentionally loose.
-    #[serde(default)]
     pub runtime: BTreeMap<String, serde_json::Value>,
 
-    #[serde(default)]
     pub restart: RestartPolicy,
-    #[serde(default)]
     pub health: Vec<HealthCheck>,
 
-    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default)]
     pub tags: Vec<String>,
 }
 
@@ -261,6 +305,11 @@ impl ServiceSpec {
         }
 
         self.restart.validate()?;
+        if let Some(mut repair) = self.repair_hook()? {
+            repair.validate()?;
+            let value = serde_json::to_value(repair)?;
+            self.runtime.insert(REPAIR_RUNTIME_KEY.to_string(), value);
+        }
         for i in 0..self.health.len() {
             self.health[i].validate().map_err(|e| match e {
                 AppError::BadRequest(msg) => AppError::BadRequest(format!("health[{i}]: {msg}")),
@@ -268,6 +317,113 @@ impl ServiceSpec {
             })?;
         }
         Ok(())
+    }
+
+    pub fn repair_hook(&self) -> Result<Option<RepairHook>> {
+        let Some(value) = self.runtime.get(REPAIR_RUNTIME_KEY) else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::from_value(value.clone())?))
+    }
+}
+
+impl Serialize for ServiceSpec {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct Out {
+            name: String,
+            description: String,
+            provider: ProviderId,
+            command: Vec<String>,
+            working_dir: String,
+            env: BTreeMap<String, String>,
+            runtime: BTreeMap<String, serde_json::Value>,
+            restart: RestartPolicy,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            repair: Option<RepairHook>,
+            health: Vec<HealthCheck>,
+            enabled: bool,
+            tags: Vec<String>,
+        }
+
+        let mut runtime = self.runtime.clone();
+        let repair = runtime
+            .remove(REPAIR_RUNTIME_KEY)
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(serde::ser::Error::custom)?;
+
+        Out {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            provider: self.provider.clone(),
+            command: self.command.clone(),
+            working_dir: self.working_dir.clone(),
+            env: self.env.clone(),
+            runtime,
+            restart: self.restart.clone(),
+            repair,
+            health: self.health.clone(),
+            enabled: self.enabled,
+            tags: self.tags.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ServiceSpec {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct In {
+            name: String,
+            #[serde(default)]
+            description: String,
+            provider: ProviderId,
+            #[serde(default)]
+            command: Vec<String>,
+            #[serde(default)]
+            working_dir: String,
+            #[serde(default)]
+            env: BTreeMap<String, String>,
+            #[serde(default)]
+            runtime: BTreeMap<String, serde_json::Value>,
+            #[serde(default)]
+            restart: RestartPolicy,
+            #[serde(default)]
+            repair: Option<RepairHook>,
+            #[serde(default)]
+            health: Vec<HealthCheck>,
+            #[serde(default = "default_true")]
+            enabled: bool,
+            #[serde(default)]
+            tags: Vec<String>,
+        }
+
+        let mut input = In::deserialize(deserializer)?;
+        if let Some(repair) = input.repair {
+            let value = serde_json::to_value(repair).map_err(serde::de::Error::custom)?;
+            input.runtime.insert(REPAIR_RUNTIME_KEY.to_string(), value);
+        }
+        Ok(Self {
+            name: input.name,
+            description: input.description,
+            provider: input.provider,
+            command: input.command,
+            working_dir: input.working_dir,
+            env: input.env,
+            runtime: input.runtime,
+            restart: input.restart,
+            health: input.health,
+            enabled: input.enabled,
+            tags: input.tags,
+        })
     }
 }
 

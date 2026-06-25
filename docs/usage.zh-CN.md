@@ -369,6 +369,13 @@ curl -fsS -X DELETE \
     "mode": "always",
     "max_retries": 0
   },
+  "repair": {
+    "mode": "hook",
+    "command": ["/srv/my-service/scripts/repair.sh"],
+    "working_dir": "/srv/my-service",
+    "env": {},
+    "timeout": "10m"
+  },
   "health": [
     {
       "type": "http",
@@ -391,9 +398,20 @@ curl -fsS -X DELETE \
 - `env`：环境变量。
 - `runtime`：provider 专用选项。
 - `restart.mode`：`no`、`on-failure`、`always`。
+- `repair`：可选修复 hook。配置后，`POST /api/v1/services/:id/repair` 会执行这里的
+  `command`；不配置时保持旧行为，即重新注册并重启服务。`restart` 和 `repair` 是两个
+  独立操作，`restart` 不会触发修复 hook，修复 hook 失败时也不会自动 fallback 到重启。
 - `health`：健康检查配置。
 - `enabled`：是否启用。
 - `tags`：标签。分组使用 `group:<name>` 标签，例如 `group:phone-control`。
+
+托管服务命令规范：
+
+- `command` 必须启动 service-manager 要托管的前台长进程。
+- 如果 `command` 指向包装脚本，脚本最后必须用 `exec` 切换到真正的服务进程。不要把服务放到后台运行后让包装脚本退出。
+- 被托管前台进程的 stdout/stderr 会由 provider 日志接口或底层服务平台捕获。服务日志应优先写到这里，不要只写隐藏的临时日志文件。
+- `health` 只说明一个正在运行的服务是否可用，不能替代 provider 的进程生命周期跟踪。正确状态应同时满足：被跟踪进程仍在运行，并且健康检查通过。
+- 修复 hook 的 stdout/stderr 会被有意丢弃。hook 失败只通过退出状态返回，避免 token、凭据、环境变量等敏感信息通过 API 泄露。
 
 服务列表和状态接口支持 `tag` / `tags`、`group` / `groups` 查询参数。多个值可以用逗号分隔，多个条件会同时匹配。`GET /api/v1/services/statuses` 和 `GET /api/v1/groups/:name/status` 返回数组，每一项形如：
 

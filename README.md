@@ -164,7 +164,8 @@ Endpoints:
 - `POST /api/v1/services/:id/start`
 - `POST /api/v1/services/:id/stop`
 - `POST /api/v1/services/:id/restart`
-- `POST /api/v1/services/:id/repair` (register + restart)
+- `POST /api/v1/services/:id/repair` (runs the service repair hook when configured; otherwise
+  legacy register + restart)
 - `GET /api/v1/services/:id/status`
 - `GET /api/v1/services/:id/logs?since=&until=&limit=`
 - `GET /api/v1/audit?limit=`
@@ -209,6 +210,25 @@ curl -fsS -H "Authorization: Bearer $TOKEN" \
 curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:20087/api/v1/groups/phone-control/restart
 ```
+
+`restart` and `repair` are intentionally separate. `restart` only re-registers the service with
+its provider and asks the provider to restart it. `repair` runs `spec.repair` when configured and
+does not fall back to restart if the hook fails; services without a repair hook keep the legacy
+register + restart behavior.
+
+Managed service command contract:
+
+- `spec.command` must start the long-lived foreground process that service-manager should own.
+- If `spec.command` points to a wrapper script, the wrapper must finish by `exec`-ing the real
+  server process. Do not start the server in the background and then exit the wrapper.
+- stdout/stderr from the managed foreground process are captured by the provider logs API or its
+  underlying service platform. Prefer writing operational logs there instead of hidden ad-hoc log
+  files.
+- `health` checks describe whether a running service is usable; they do not replace provider
+  lifecycle tracking. A service should be considered healthy only when the tracked process is still
+  running and its health checks pass.
+- Repair hook stdout/stderr are intentionally discarded. Hook failures are returned by exit status
+  only so tokens, credentials, and environment details are not leaked through the API.
 
 CLI support today is for running the server, diagnostics, token management, and installing the
 service-manager daemon:

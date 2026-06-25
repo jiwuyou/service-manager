@@ -834,6 +834,280 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_with_repair_hook_does_not_run_hook() {
+        let (state, tok) = test_state();
+        let app = super::router(state);
+        let marker = std::env::temp_dir().join(format!(
+            "service-manager-restart-hook-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let spec = serde_json::json!({
+            "name": "demo-restart-hook",
+            "provider": "fake",
+            "command": ["echo", "hi"],
+            "repair": {
+                "mode": "hook",
+                "command": ["sh", "-c", "printf hook > \"$1\"", "sh", marker.to_string_lossy()],
+                "timeout": "5s"
+            }
+        });
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/services")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(spec.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let svc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(svc["spec"]["repair"].is_object());
+        assert!(svc["spec"]["runtime"]["service-manager.repair"].is_null());
+        let id = svc["id"].as_str().unwrap();
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/services/{id}/restart"))
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn repair_without_hook_uses_legacy_restart() {
+        let (state, tok) = test_state();
+        let app = super::router(state);
+
+        let spec = serde_json::json!({
+            "name": "demo-legacy-repair",
+            "provider": "fake",
+            "command": ["echo", "hi"]
+        });
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/services")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(spec.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let svc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let id = svc["id"].as_str().unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/services/{id}/repair"))
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/services/{id}/status"))
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status["state"], "running");
+    }
+
+    #[tokio::test]
+    async fn repair_with_hook_executes_hook_and_propagates_failure() {
+        let (state, tok) = test_state();
+        let app = super::router(state);
+        let marker = std::env::temp_dir().join(format!(
+            "service-manager-repair-hook-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let spec = serde_json::json!({
+            "name": "demo-repair-hook",
+            "provider": "fake",
+            "command": ["echo", "hi"],
+            "repair": {
+                "mode": "hook",
+                "command": [
+                    "sh",
+                    "-c",
+                    "printf ran > \"$1\"; printf 'stdout-secret-token'; printf 'stderr-secret-token' >&2; exit 17",
+                    "sh",
+                    marker.to_string_lossy()
+                ],
+                "timeout": "5s"
+            }
+        });
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/services")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(spec.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let svc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let id = svc["id"].as_str().unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/services/{id}/repair"))
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("repair hook failed")
+        );
+        let body_text = body.to_string();
+        assert!(!body_text.contains("stdout-secret-token"));
+        assert!(!body_text.contains("stderr-secret-token"));
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "ran");
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/services/{id}/status"))
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status["state"], "stopped");
+    }
+
+    #[tokio::test]
+    async fn repair_with_successful_hook_does_not_restart_provider() {
+        let (state, tok) = test_state();
+        let app = super::router(state);
+        let marker = std::env::temp_dir().join(format!(
+            "service-manager-repair-success-hook-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let spec = serde_json::json!({
+            "name": "demo-repair-success-hook",
+            "provider": "fake",
+            "command": ["echo", "hi"],
+            "repair": {
+                "mode": "hook",
+                "command": ["sh", "-c", "printf ran > \"$1\"", "sh", marker.to_string_lossy()],
+                "timeout": "5s"
+            }
+        });
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/services")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(spec.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let svc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let id = svc["id"].as_str().unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/services/{id}/repair"))
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "ran");
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/services/{id}/status"))
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status["state"], "stopped");
+    }
+
+    #[tokio::test]
     async fn group_lifecycle() {
         let (state, tok) = test_state();
         let app = super::router(state);

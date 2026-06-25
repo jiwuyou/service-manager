@@ -6,7 +6,11 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+#[path = "repair_hook.rs"]
+mod repair_hook;
+
 use chrono::{DateTime, SecondsFormat, Utc};
+use repair_hook::run_repair_hook;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
@@ -473,8 +477,14 @@ impl Engine {
             .get(&svc.spec.provider)
             .ok_or_else(|| AppError::ProviderNotFound(svc.spec.provider.0.clone()))?;
 
-        p.register(&svc).await?;
-        p.restart(&svc).await?;
+        let details = if svc.spec.repair_hook()?.is_some() {
+            run_repair_hook(&svc).await?;
+            "repair hook".to_string()
+        } else {
+            p.register(&svc).await?;
+            p.restart(&svc).await?;
+            "legacy register + restart".to_string()
+        };
 
         let _ = self.store.append_audit_event(AuditEvent {
             id: new_id(16)?,
@@ -483,7 +493,7 @@ impl Engine {
             service_id: Some(id.clone()),
             provider: Some(svc.spec.provider),
             actor: "api".to_string(),
-            details: "register + restart".to_string(),
+            details,
         });
         Ok(())
     }
