@@ -166,7 +166,8 @@ async fn services_get(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
-    let svc = state.engine.get_service(&ServiceId(id))?;
+    let service_id = resolve_service_id(&state, &id)?;
+    let svc = state.engine.get_service(&service_id)?;
     Ok(Json(serde_json::to_value(svc)?))
 }
 
@@ -176,7 +177,8 @@ async fn services_update(
     body: Bytes,
 ) -> Result<Json<serde_json::Value>> {
     let spec: ServiceSpec = parse_json_body(&body)?;
-    let svc = state.engine.update_service(&ServiceId(id), spec).await?;
+    let service_id = resolve_service_id(&state, &id)?;
+    let svc = state.engine.update_service(&service_id, spec).await?;
     Ok(Json(serde_json::to_value(svc)?))
 }
 
@@ -184,7 +186,8 @@ async fn services_delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    state.engine.delete_service(&ServiceId(id)).await?;
+    let service_id = resolve_service_id(&state, &id)?;
+    state.engine.delete_service(&service_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -192,12 +195,14 @@ async fn service_start(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    state.engine.start(&ServiceId(id)).await?;
+    let service_id = resolve_service_id(&state, &id)?;
+    state.engine.start(&service_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn service_stop(State(state): State<AppState>, Path(id): Path<String>) -> Result<StatusCode> {
-    state.engine.stop(&ServiceId(id)).await?;
+    let service_id = resolve_service_id(&state, &id)?;
+    state.engine.stop(&service_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -205,7 +210,8 @@ async fn service_restart(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    state.engine.restart(&ServiceId(id)).await?;
+    let service_id = resolve_service_id(&state, &id)?;
+    state.engine.restart(&service_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -213,7 +219,8 @@ async fn service_repair(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    state.engine.repair(&ServiceId(id)).await?;
+    let service_id = resolve_service_id(&state, &id)?;
+    state.engine.repair(&service_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -221,7 +228,8 @@ async fn service_register(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    state.engine.register(&ServiceId(id)).await?;
+    let service_id = resolve_service_id(&state, &id)?;
+    state.engine.register(&service_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -229,7 +237,8 @@ async fn service_unregister(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    state.engine.unregister(&ServiceId(id)).await?;
+    let service_id = resolve_service_id(&state, &id)?;
+    state.engine.unregister(&service_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -237,7 +246,8 @@ async fn service_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
-    let st = state.engine.status(&ServiceId(id)).await?;
+    let service_id = resolve_service_id(&state, &id)?;
+    let st = state.engine.status(&service_id).await?;
     Ok(Json(serde_json::to_value(st)?))
 }
 
@@ -253,13 +263,48 @@ async fn service_logs(
     Path(id): Path<String>,
     Query(q): Query<LogsQuery>,
 ) -> Result<Json<serde_json::Value>> {
+    let service_id = resolve_service_id(&state, &id)?;
     let opts = LogsOptions {
         since: parse_rfc3339_opt(q.since.as_deref())?,
         until: parse_rfc3339_opt(q.until.as_deref())?,
         limit: parse_usize_opt(q.limit.as_deref())?,
     };
-    let logs = state.engine.logs(&ServiceId(id), opts).await?;
+    let logs = state.engine.logs(&service_id, opts).await?;
     Ok(Json(serde_json::to_value(logs)?))
+}
+
+fn resolve_service_id(state: &AppState, raw: &str) -> Result<ServiceId> {
+    let token = raw.trim();
+    if token.is_empty() {
+        return Err(AppError::BadRequest("service id is required".to_string()));
+    }
+
+    let direct = ServiceId(token.to_string());
+    match state.engine.get_service(&direct) {
+        Ok(_) => return Ok(direct),
+        Err(AppError::NotFound) => {}
+        Err(err) => return Err(err),
+    }
+
+    let matches: Vec<Service> = state
+        .engine
+        .list_services()?
+        .into_iter()
+        .filter(|svc| svc.spec.name == token)
+        .collect();
+
+    match matches.as_slice() {
+        [svc] => Ok(svc.id.clone()),
+        [] => Err(AppError::NotFound),
+        many => Err(AppError::BadRequest(format!(
+            "service name {:?} is ambiguous; matching ids: {}",
+            token,
+            many.iter()
+                .map(|svc| svc.id.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -831,6 +876,175 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn service_routes_accept_spec_name_alias() {
+        let (state, tok) = test_state();
+        let app = super::router(state);
+
+        let spec = serde_json::json!({
+            "name": "demo-alias",
+            "description": "service name alias target",
+            "provider": "fake",
+            "command": ["echo", "hi"],
+            "working_dir": "",
+            "env": {},
+            "runtime": {},
+            "restart": {"mode": "no", "max_retries": 0},
+            "health": [],
+            "enabled": true,
+            "tags": ["alias-test"]
+        });
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/services")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(spec.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let svc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let id = svc["id"].as_str().unwrap();
+        assert_ne!(id, "demo-alias");
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/services/demo-alias/start")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/services/demo-alias/status")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status["service_id"], id);
+        assert_eq!(status["state"], "running");
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/services/demo-alias/logs")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/services/{id}/status"))
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn service_name_alias_rejects_ambiguous_matches() {
+        let (state, tok) = test_state();
+        let app = super::router(state);
+
+        let mut ids = Vec::new();
+        for description in ["first ambiguous service", "second ambiguous service"] {
+            let spec = serde_json::json!({
+                "name": "demo-ambiguous-alias",
+                "description": description,
+                "provider": "fake",
+                "command": ["echo", description],
+                "working_dir": "",
+                "env": {},
+                "runtime": {},
+                "restart": {"mode": "no", "max_retries": 0},
+                "health": [],
+                "enabled": true,
+                "tags": ["alias-ambiguity-test"]
+            });
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/services")
+                        .header(AUTHORIZATION, format!("Bearer {tok}"))
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(spec.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::CREATED);
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            let svc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            ids.push(svc["id"].as_str().unwrap().to_string());
+        }
+        assert_ne!(ids[0], ids[1]);
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/services/demo-ambiguous-alias/status")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ambiguous")
+        );
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/services/demo-ambiguous-alias/start")
+                    .header(AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
